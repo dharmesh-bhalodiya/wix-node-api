@@ -183,10 +183,10 @@ WIX_APPS_JSON={"11c28482-01cc-4a0d-b1d5-0651e0fc0119":{"publicKey":"-----BEGIN P
 
 ## Member enrichment
 
-The server extracts `memberId` from webhook metadata and attempts member lookup using Wix Members SDK module.
+The server extracts `memberId` from webhook metadata/payload and attempts member lookup using Wix Members SDK module (`getMember` and query fallback).
 If resolved, it stores:
 
-- `userEmail`
+- `userEmail` (owner/member email if available)
 - `userName`
 - `memberDetails` (full member JSON)
 
@@ -209,3 +209,9 @@ it usually means `GOOGLE_PRIVATE_KEY` is malformed in env config. This server no
 - validating key at startup using `crypto.createPrivateKey`
 
 **Render tip:** set env key as `GOOGLE_PRIVATE_KEY`, and value only as key content (do not prefix with `GOOGLE_PRIVATE_KEY=` in value field).
+
+
+## RequestId correlation behavior
+
+- Primary mapping uses webhook payload hints (`instanceId`, `originInstanceId`, `memberId`) to attach same numeric `requestId` in both sheets.
+- If event arrives without a match, service generates a fallback numeric `requestId` so `Installs` is never blank.

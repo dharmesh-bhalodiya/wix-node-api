@@ -209,33 +209,38 @@ function decodeJwtPayload(rawBody) {
   }
 }
 
+function tryParseJson(value) {
+  if (typeof value !== 'string') return value;
+  try {
+    return JSON.parse(value);
+  } catch (_error) {
+    return value;
+  }
+}
+
 function extractRequestHints(rawBody) {
   const payload = decodeJwtPayload(rawBody);
-  if (!payload) return { instanceId: '', memberId: '' };
+  let envelope = payload?.data;
 
-  let eventEnvelope = payload.data;
-  if (typeof eventEnvelope === 'string') {
+  if (!envelope) {
     try {
-      eventEnvelope = JSON.parse(eventEnvelope);
+      envelope = JSON.parse(String(rawBody || '{}'));
     } catch (_error) {
-      eventEnvelope = {};
+      envelope = {};
     }
   }
 
-  let metadata = eventEnvelope?.metadata || {};
-  if (typeof metadata === 'string') {
-    try {
-      metadata = JSON.parse(metadata);
-    } catch (_error) {
-      metadata = {};
-    }
-  }
+  envelope = tryParseJson(envelope) || {};
 
-  const identity = metadata?.identity || {};
+  const metadata = tryParseJson(envelope.metadata) || {};
+  const identity = tryParseJson(metadata.identity) || tryParseJson(envelope.identity) || {};
+  const dataSection = tryParseJson(envelope.data) || {};
 
   return {
-    instanceId: metadata?.instanceId || '',
-    memberId: identity?.memberId || ''
+    instanceId: metadata.instanceId || envelope.instanceId || dataSection.instanceId || '',
+    originInstanceId: dataSection.originInstanceId || metadata.originInstanceId || '',
+    memberId: identity.memberId || '',
+    appId: dataSection.appId || envelope.appId || ''
   };
 }
 
@@ -253,7 +258,7 @@ const sheets = google.sheets({ version: 'v4', auth });
 
 let requestCounter = null;
 let counterQueue = Promise.resolve();
-const pendingRequestsByInstance = new Map();
+const pendingRequestsByKey = new Map();
 
 async function initializeRequestCounter() {
   if (requestCounter !== null) {
@@ -286,6 +291,55 @@ function getNextRequestId() {
 
   counterQueue = nextTask.then(() => undefined, () => undefined);
   return nextTask;
+}
+
+
+function setPendingRequest(hints, requestId) {
+  const record = {
+    requestId,
+    memberId: hints.memberId || '',
+    appId: hints.appId || '',
+    createdAt: Date.now()
+  };
+
+  const keys = [hints.instanceId, hints.originInstanceId, hints.memberId].filter(Boolean);
+  for (const key of keys) {
+    pendingRequestsByKey.set(key, record);
+  }
+}
+
+function getPendingRequest(event) {
+  const keys = [
+    event?.metadata?.instanceId,
+    event?.instanceId,
+    event?.data?.originInstanceId,
+    event?.metadata?.originInstanceId,
+    event?.metadata?.identity?.memberId,
+    event?.identity?.memberId
+  ].filter(Boolean);
+
+  for (const key of keys) {
+    if (pendingRequestsByKey.has(key)) {
+      return pendingRequestsByKey.get(key);
+    }
+  }
+
+  return null;
+}
+
+function clearPendingRequest(event) {
+  const keys = [
+    event?.metadata?.instanceId,
+    event?.instanceId,
+    event?.data?.originInstanceId,
+    event?.metadata?.originInstanceId,
+    event?.metadata?.identity?.memberId,
+    event?.identity?.memberId
+  ].filter(Boolean);
+
+  for (const key of keys) {
+    pendingRequestsByKey.delete(key);
+  }
 }
 
 async function appendRow(sheetName, row) {
@@ -338,27 +392,50 @@ async function fetchMemberDetails(client, memberId) {
     return { email: '', name: '', raw: '' };
   }
 
-  const apiCandidates = [
-    () => client.members?.getMember?.(memberId),
-    () => client.members?.getMember?.({ memberId }),
-    () => client.members?.getMember?.({ id: memberId })
+  const candidates = [
+    async () => client.members?.getMember?.(memberId),
+    async () => client.members?.getMember?.({ memberId }),
+    async () => client.members?.getMember?.({ id: memberId }),
+    async () => {
+      const q = client.members?.queryMembers?.();
+      if (!q?.hasSome) return null;
+      const result = await q.hasSome('id', [memberId]).find();
+      return result?.items?.[0] || null;
+    }
   ];
 
-  for (const tryCall of apiCandidates) {
+  for (const tryCall of candidates) {
     try {
       const response = await tryCall();
       if (!response) continue;
       const member = response.member || response;
-      const profile = member.profile || member.contact || {};
-      const name = profile.nickname || profile.name || profile.firstName || member.name || '';
-      const email = profile.email || member.loginEmail || member.primaryEmail || '';
+      const profile = member.profile || member.contact || member.info || {};
+      const privacy = member.privacyStatus || member.privacy || {};
+
+      const emails = [
+        profile.email,
+        member.loginEmail,
+        member.primaryEmail,
+        member?.contactDetails?.emails?.[0]?.email,
+        member?.contact?.emails?.[0]?.email,
+        privacy?.email
+      ].filter(Boolean);
+
+      const names = [
+        profile.nickname,
+        profile.name,
+        [profile.firstName, profile.lastName].filter(Boolean).join(' ').trim(),
+        member.name,
+        member?.contact?.name
+      ].filter(Boolean);
+
       return {
-        email,
-        name,
+        email: emails[0] || '',
+        name: names[0] || '',
         raw: JSON.stringify(member)
       };
     } catch (_error) {
-      // Try next candidate silently.
+      // continue
     }
   }
 
@@ -375,8 +452,8 @@ function createWixClient(appId, publicKey) {
   });
 
   client.appInstances.onAppInstanceInstalled(async (event) => {
-    const instanceId = event?.metadata?.instanceId || '';
-    const pending = pendingRequestsByInstance.get(instanceId);
+    const instanceId = event?.metadata?.instanceId || event?.instanceId || '';
+    const pending = getPendingRequest(event);
 
     const memberId =
       event?.metadata?.identity?.memberId ||
@@ -387,7 +464,7 @@ function createWixClient(appId, publicKey) {
     const memberDetails = await fetchMemberDetails(client, memberId);
 
     const entry = {
-      requestId: pending?.requestId || '',
+      requestId: pending?.requestId || await getNextRequestId(),
       receivedAt: new Date().toISOString(),
       eventName: 'APP_INSTANCE_INSTALLED',
       appId,
@@ -408,9 +485,7 @@ function createWixClient(appId, publicKey) {
       const errorContext = parseErrorContext(error);
       console.error('Failed to append install row', { appId, ...errorContext });
     } finally {
-      if (instanceId) {
-        pendingRequestsByInstance.delete(instanceId);
-      }
+      clearPendingRequest(event);
     }
   });
 
@@ -471,13 +546,7 @@ app.post(`${webhookBasePath}/:webhookSecret`, express.text({ type: '*/*', limit:
   const webhookSecret = req.params.webhookSecret || '';
   const hints = extractRequestHints(rawBody);
 
-  if (hints.instanceId) {
-    pendingRequestsByInstance.set(hints.instanceId, {
-      requestId,
-      memberId: hints.memberId,
-      createdAt: Date.now()
-    });
-  }
+  setPendingRequest(hints, requestId);
 
   let matchedAppId = '';
   let httpStatus = 401;
