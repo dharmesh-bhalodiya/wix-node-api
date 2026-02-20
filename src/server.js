@@ -71,6 +71,11 @@ function toBase64FromPem(value) {
     .replace(/\s+/g, '');
 }
 
+function toPemFromBase64(value) {
+  const chunks = value.match(/.{1,64}/g) || [];
+  return '-----BEGIN PUBLIC KEY-----\n' + chunks.join('\n') + '\n-----END PUBLIC KEY-----';
+}
+
 function normalizePublicKey(rawKey) {
   let value = String(rawKey || '').trim();
   if (!value) return '';
@@ -82,13 +87,12 @@ function normalizePublicKey(rawKey) {
 
   value = value.replace(/\\n/g, '\n').trim();
 
-  // Wix SDK helper may attempt atob() on provided key; passing PEM directly can fail.
-  // Convert PEM to plain base64 body so atob() always gets valid characters.
+  // Keep SPKI PEM for jose/importSPKI compatibility.
   if (value.includes('BEGIN PUBLIC KEY')) {
-    return toBase64FromPem(value);
+    return value;
   }
 
-  // If it's base64url, convert to base64 before passing to SDK.
+  // If key is base64url/base64 body, convert it into PEM.
   if (/^[A-Za-z0-9_-]+$/.test(value) && (value.includes('-') || value.includes('_'))) {
     value = value.replace(/-/g, '+').replace(/_/g, '/');
   }
@@ -99,13 +103,11 @@ function normalizePublicKey(rawKey) {
     value = value + '='.repeat(4 - mod);
   }
 
+  if (/^[A-Za-z0-9+/=]+$/.test(value)) {
+    return toPemFromBase64(value);
+  }
+
   return value;
-}
-
-
-function toPemFromBase64(value) {
-  const chunks = value.match(/.{1,64}/g) || [];
-  return '-----BEGIN PUBLIC KEY-----\n' + chunks.join('\n') + '\n-----END PUBLIC KEY-----';
 }
 
 function validateNormalizedPublicKey(publicKey) {
@@ -113,24 +115,18 @@ function validateNormalizedPublicKey(publicKey) {
     return { valid: false, reason: 'empty_public_key', fingerprint: '' };
   }
 
-  if (!/^[A-Za-z0-9+/=]+$/.test(publicKey)) {
-    return { valid: false, reason: 'non_base64_characters', fingerprint: '' };
-  }
-
   try {
-    const decoded = Buffer.from(publicKey, 'base64');
-    if (!decoded.length) {
-      return { valid: false, reason: 'decoded_key_is_empty', fingerprint: '' };
-    }
-
     // Validate key structure with Node crypto parser for early startup feedback.
-    const pem = toPemFromBase64(publicKey);
-    crypto.createPublicKey(pem);
+    const normalizedPem = publicKey.includes('BEGIN PUBLIC KEY')
+      ? publicKey
+      : toPemFromBase64(toBase64FromPem(publicKey));
+
+    crypto.createPublicKey(normalizedPem);
 
     return {
       valid: true,
       reason: '',
-      fingerprint: crypto.createHash('sha256').update(publicKey).digest('hex').slice(0, 16)
+      fingerprint: crypto.createHash('sha256').update(normalizedPem).digest('hex').slice(0, 16)
     };
   } catch (error) {
     return {

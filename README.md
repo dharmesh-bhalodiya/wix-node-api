@@ -148,10 +148,11 @@ at atob (...)
 it usually means the Wix `publicKey` value is not in the expected format. This server now normalizes keys by:
 
 - converting escaped `\n` sequences to real newlines
-- converting PEM blocks to base64 payload for Wix SDK parsing
+- preserving valid SPKI PEM input (required by current Wix SDK/jose)
+- converting base64/base64url key bodies into SPKI PEM format
 - normalizing base64url keys (`-`,`_`) to standard base64 with proper padding
 
-You can provide either full PEM or base64-style key in `WIX_APPS_JSON`; the server normalizes both.
+You can provide either full PEM or base64-style key in `WIX_APPS_JSON`; the server normalizes both to SPKI PEM.
 
 
 ## Startup public-key self-check
