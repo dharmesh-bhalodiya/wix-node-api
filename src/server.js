@@ -14,13 +14,38 @@ const webhookBasePath = process.env.WEBHOOK_BASE_PATH || process.env.WEBHOOK_PAT
 const spreadsheetId = process.env.GOOGLE_SPREADSHEET_ID;
 const installsSheetName = process.env.GOOGLE_INSTALLS_SHEET_NAME || 'Installs';
 const logsSheetName = process.env.GOOGLE_LOGS_SHEET_NAME || 'WebhookLogs';
-const wixApps = JSON.parse(process.env.WIX_APPS_JSON || '{}');
+const wixApps = parseWixAppsConfig(process.env.WIX_APPS_JSON);
 
 if (!spreadsheetId) {
   throw new Error('Missing GOOGLE_SPREADSHEET_ID');
 }
 if (!Object.keys(wixApps).length) {
-  throw new Error('Missing WIX_APPS_JSON configuration');
+  throw new Error('WIX_APPS_JSON must include at least 1 app configuration');
+}
+
+
+function parseWixAppsConfig(rawValue) {
+  const value = String(rawValue || '').trim();
+
+  if (!value) {
+    throw new Error('Missing WIX_APPS_JSON configuration');
+  }
+
+  // Common Render mistake: pasting `WIX_APPS_JSON={...}` as value.
+  const jsonCandidate = value.startsWith('WIX_APPS_JSON=')
+    ? value.slice('WIX_APPS_JSON='.length).trim()
+    : value;
+
+  try {
+    const parsed = JSON.parse(jsonCandidate);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      throw new Error('WIX_APPS_JSON must be a JSON object keyed by appId');
+    }
+    return parsed;
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    throw new Error(`Invalid WIX_APPS_JSON value. Ensure env contains only raw JSON object (not prefixed with WIX_APPS_JSON=). Parse error: ${reason}`);
+  }
 }
 
 app.disable('x-powered-by');

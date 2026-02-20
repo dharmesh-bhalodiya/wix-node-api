@@ -166,6 +166,10 @@ The same `publicKeyChecks` summary is exposed in `GET /healthz` for quick diagno
 
 ## Exact `.env` JSON example with your app/key
 
+
+> **Render tip:** In Render dashboard, set key as `WIX_APPS_JSON` and value as only JSON content.
+> Do **not** paste `WIX_APPS_JSON=...` into the value field, or parsing will fail.
+
 Use this exact value for `WIX_APPS_JSON` (single line):
 
 ```env
