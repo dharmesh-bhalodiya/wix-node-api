@@ -463,10 +463,90 @@ async function queryContactByIdentity(client, identity) {
   return null;
 }
 
+
+function pickFirstNonEmpty(values) {
+  for (const value of values) {
+    if (value) return value;
+  }
+  return '';
+}
+
+function extractOwnerDetails(source) {
+  if (!source) return null;
+
+  const owner =
+    source.siteOwner ||
+    source.owner ||
+    source.accountOwner ||
+    source.appOwner ||
+    source.installedBy ||
+    source.createdBy ||
+    source.user ||
+    source;
+
+  const email = pickFirstNonEmpty([
+    owner?.email,
+    owner?.loginEmail,
+    owner?.primaryEmail,
+    owner?.contact?.email,
+    owner?.contactInfo?.email,
+    source?.siteOwnerEmail,
+    source?.ownerEmail
+  ]);
+
+  const name = pickFirstNonEmpty([
+    owner?.name,
+    [owner?.firstName, owner?.lastName].filter(Boolean).join(' ').trim(),
+    source?.siteOwnerName,
+    source?.ownerName
+  ]);
+
+  if (!email && !name) return null;
+
+  return {
+    email,
+    name,
+    userId: pickFirstNonEmpty([owner?.id, owner?.userId, owner?.wixUserId]),
+    raw: JSON.stringify(source)
+  };
+}
+
+async function fetchOwnerDetailsFromAppInstance(client, identity) {
+  const instanceId = identity?.instanceId || identity?.originInstanceId || '';
+
+  const calls = [
+    async () => client.appInstances?.getAppInstance?.(instanceId),
+    async () => client.appInstances?.getAppInstance?.({ instanceId }),
+    async () => client.appInstances?.getAppInstanceById?.(instanceId),
+    async () => client.appInstances?.getAppInstanceById?.({ instanceId }),
+    async () => client.appInstances?.getAppInstanceDetails?.(instanceId),
+    async () => client.appInstances?.getAppInstanceDetails?.({ instanceId })
+  ];
+
+  for (const call of calls) {
+    try {
+      const response = await call();
+      const candidate = extractOwnerDetails(response?.appInstance || response?.instance || response);
+      if (candidate?.email) {
+        return candidate;
+      }
+    } catch (_error) {
+      // continue
+    }
+  }
+
+  return null;
+}
+
 async function fetchIdentityDetails(client, identity) {
   const identityType = identity?.identityType || '';
   const memberId = identity?.memberId || '';
   const wixUserId = identity?.wixUserId || '';
+
+  const ownerDetails = await fetchOwnerDetailsFromAppInstance(client, identity);
+  if (ownerDetails?.email) {
+    return ownerDetails;
+  }
 
   const contactDetails = await queryContactByIdentity(client, identity);
   if (contactDetails?.email) {
@@ -584,7 +664,9 @@ function createWixClient(appId, publicKey) {
         pending?.wixUserId ||
         '',
       originatedEmail: event?.originatedFrom?.userEmail || event?.metadata?.userEmail || '',
-      originatedName: event?.originatedFrom?.userName || ''
+      originatedName: event?.originatedFrom?.userName || '',
+      instanceId: event?.metadata?.instanceId || event?.instanceId || '',
+      originInstanceId: event?.data?.originInstanceId || event?.metadata?.originInstanceId || ''
     };
 
     const memberDetails = await fetchIdentityDetails(client, identity);
