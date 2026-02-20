@@ -31,6 +31,35 @@ function toGooglePrivateKey(rawKey) {
   return rawKey.replace(/\\n/g, '\n');
 }
 
+function sanitizeForSheet(value) {
+  if (value === null || value === undefined) return '';
+  return String(value)
+    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, ' ')
+    .trim();
+}
+
+function parseErrorContext(error) {
+  if (!(error instanceof Error)) {
+    return {
+      errorMessage: sanitizeForSheet(String(error || 'Unknown error')),
+      errorLine: '',
+      errorStack: ''
+    };
+  }
+
+  const stack = error.stack || '';
+  const firstCodeLine = stack
+    .split('\n')
+    .map((line) => line.trim())
+    .find((line) => line.startsWith('at '));
+
+  return {
+    errorMessage: sanitizeForSheet(error.message || 'Unknown error'),
+    errorLine: sanitizeForSheet(firstCodeLine || ''),
+    errorStack: sanitizeForSheet(stack.slice(0, 4000))
+  };
+}
+
 const auth = new google.auth.GoogleAuth({
   credentials: {
     client_email: process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL,
@@ -47,7 +76,7 @@ async function appendRow(sheetName, row) {
     range: `${sheetName}!A:Z`,
     valueInputOption: 'USER_ENTERED',
     requestBody: {
-      values: [row]
+      values: [row.map((cell) => sanitizeForSheet(cell))]
     }
   });
 }
@@ -74,7 +103,10 @@ async function appendWebhookLog(entry) {
     entry.status,
     entry.matchedAppId,
     entry.httpStatus,
+    entry.failureStep,
     entry.errorMessage,
+    entry.errorLine,
+    entry.errorStack,
     entry.requestPath,
     entry.webhookSecret,
     entry.requestBody
@@ -108,7 +140,8 @@ function createWixClient(appId, publicKey) {
       await appendInstallRow(entry);
       console.log('Stored install event', { appId, instanceId: entry.instanceId });
     } catch (error) {
-      console.error('Failed to append install row', { appId, error });
+      const errorContext = parseErrorContext(error);
+      console.error('Failed to append install row', { appId, ...errorContext });
     }
   });
 
@@ -156,9 +189,13 @@ app.post(`${webhookBasePath}/:webhookSecret`, express.text({ type: '*/*', limit:
   let matchedAppId = '';
   let httpStatus = 401;
   let status = 'FAILED';
+  let failureStep = 'init';
   let errorMessage = 'Invalid webhook payload';
+  let errorLine = '';
+  let errorStack = '';
 
   try {
+    failureStep = 'resolve_secret';
     const configured = secretToClientMap[webhookSecret];
     if (!configured) {
       httpStatus = 403;
@@ -169,23 +206,44 @@ app.post(`${webhookBasePath}/:webhookSecret`, express.text({ type: '*/*', limit:
     const { appId, client } = configured;
 
     try {
+      failureStep = 'wix_webhook_process';
       await client.webhooks.process(rawBody);
       matchedAppId = appId;
       status = 'SUCCESS';
       httpStatus = 200;
+      failureStep = '';
       errorMessage = '';
       return res.status(200).send();
     } catch (error) {
+      const errorContext = parseErrorContext(error);
       matchedAppId = appId;
       httpStatus = 401;
-      errorMessage = error instanceof Error ? error.message : 'Invalid webhook payload';
+      errorMessage = errorContext.errorMessage;
+      errorLine = errorContext.errorLine;
+      errorStack = errorContext.errorStack;
+      console.error('Webhook verification failed', {
+        requestId,
+        appId,
+        failureStep,
+        errorMessage,
+        errorLine
+      });
       return res.status(401).json({ error: 'Invalid webhook payload for app' });
     }
   } catch (error) {
+    const errorContext = parseErrorContext(error);
     status = 'FAILED';
     httpStatus = 500;
-    errorMessage = error instanceof Error ? error.message : 'Internal server error';
-    console.error('Webhook error', error);
+    failureStep = failureStep || 'unexpected_error';
+    errorMessage = errorContext.errorMessage;
+    errorLine = errorContext.errorLine;
+    errorStack = errorContext.errorStack;
+    console.error('Webhook error', {
+      requestId,
+      failureStep,
+      errorMessage,
+      errorLine
+    });
     return res.status(500).json({ error: 'Internal server error' });
   } finally {
     try {
@@ -195,13 +253,21 @@ app.post(`${webhookBasePath}/:webhookSecret`, express.text({ type: '*/*', limit:
         status,
         matchedAppId,
         httpStatus,
+        failureStep,
         errorMessage,
+        errorLine,
+        errorStack,
         requestPath: req.originalUrl,
         webhookSecret,
         requestBody: rawBody
       });
     } catch (logError) {
-      console.error('Failed to append webhook log row', logError);
+      const logErrorContext = parseErrorContext(logError);
+      console.error('Failed to append webhook log row', {
+        requestId,
+        errorMessage: logErrorContext.errorMessage,
+        errorLine: logErrorContext.errorLine
+      });
     }
   }
 });

@@ -54,10 +54,13 @@ Header row:
 3. `status` (`SUCCESS` / `FAILED`)
 4. `matchedAppId`
 5. `httpStatus`
-6. `errorMessage`
-7. `requestPath`
-8. `webhookSecret`
-9. `requestBody`
+6. `failureStep`
+7. `errorMessage`
+8. `errorLine`
+9. `errorStack`
+10. `requestPath`
+11. `webhookSecret`
+12. `requestBody`
 
 ## 2) Get Google credentials and spreadsheet ID
 
@@ -121,7 +124,14 @@ npm start
 ## Failure handling behavior
 
 - Unknown secret -> `403`, logged in `WebhookLogs`
-- Known secret but invalid Wix signature/payload -> `401`, logged in `WebhookLogs`
+- Known secret but invalid Wix signature/payload -> `401`, logged in `WebhookLogs` with `failureStep`, `errorLine`, and `errorStack`
 - Valid payload -> `200`, logged in `WebhookLogs` and install event stored in `Installs`
 
 So every request is captured in logs, and only valid install events go to installs tab.
+
+## Debugging notes
+
+- `failureStep` tells which part failed (`resolve_secret`, `wix_webhook_process`, etc.).
+- `errorLine` stores the first stack location (`at ...:line:column`) for quick tracing.
+- `errorStack` stores a truncated stack trace for deeper debugging.
+- Control characters in request/error text are sanitized before writing to Sheets to reduce "invalid character" write issues.
