@@ -93,6 +93,7 @@ Set:
 - `GOOGLE_INSTALLS_SHEET_NAME` (default `Installs`)
 - `GOOGLE_LOGS_SHEET_NAME` (default `WebhookLogs`)
 - `WEBHOOK_BASE_PATH` (default `/webhooks/wix/install`)
+- `WEBHOOK_PATH` (legacy fallback if `WEBHOOK_BASE_PATH` is not set)
 - `WIX_APPS_JSON`
 
 Example `WIX_APPS_JSON`:

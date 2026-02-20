@@ -9,7 +9,7 @@ const { appInstances } = require('@wix/app-management');
 
 const app = express();
 const port = Number(process.env.PORT || 3000);
-const webhookBasePath = process.env.WEBHOOK_BASE_PATH || '/webhooks/wix/install';
+const webhookBasePath = process.env.WEBHOOK_BASE_PATH || process.env.WEBHOOK_PATH || '/webhooks/wix/install';
 
 const spreadsheetId = process.env.GOOGLE_SPREADSHEET_ID;
 const installsSheetName = process.env.GOOGLE_INSTALLS_SHEET_NAME || 'Installs';
