@@ -1,0 +1,24 @@
+{
+  "name": "wix-install-webhook-sheets",
+  "version": "1.0.0",
+  "description": "Single endpoint to capture Wix app installation events and store them in Google Sheets",
+  "main": "src/server.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js",
+    "check": "node --check src/server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "@wix/app-management": "latest",
+    "@wix/sdk": "latest",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "googleapis": "^140.0.1",
+    "helmet": "^7.1.0",
+    "@wix/members": "latest"
+  }
+}
