@@ -191,3 +191,21 @@ If resolved, it stores:
 - `memberDetails` (full member JSON)
 
 If lookup fails, install row is still written with available event fields.
+
+
+## Google private key format troubleshooting
+
+If you see OpenSSL errors like:
+
+```text
+Error: error:1E08010C:DECODER routines::unsupported
+```
+
+it usually means `GOOGLE_PRIVATE_KEY` is malformed in env config. This server now normalizes private keys by:
+
+- removing wrapping quotes if present
+- converting escaped `\n` to real newlines
+- accepting base64/base64url key body and converting to PEM
+- validating key at startup using `crypto.createPrivateKey`
+
+**Render tip:** set env key as `GOOGLE_PRIVATE_KEY`, and value only as key content (do not prefix with `GOOGLE_PRIVATE_KEY=` in value field).

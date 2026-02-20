@@ -50,9 +50,53 @@ function parseWixAppsConfig(rawValue) {
 app.disable('x-powered-by');
 app.use(helmet());
 
-function toGooglePrivateKey(rawKey) {
-  if (!rawKey) return rawKey;
-  return rawKey.replace(/\n/g, '\n');
+function toPemFromBase64PrivateKey(value) {
+  const chunks = value.match(/.{1,64}/g) || [];
+  return '-----BEGIN PRIVATE KEY-----\n' + chunks.join('\n') + '\n-----END PRIVATE KEY-----';
+}
+
+function normalizeGooglePrivateKey(rawKey) {
+  let value = String(rawKey || '').trim();
+  if (!value) return '';
+
+  if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
+    value = value.slice(1, -1);
+  }
+
+  value = value.replace(/\\n/g, '\n').trim();
+
+
+  if (value.includes('BEGIN PRIVATE KEY')) {
+    return value;
+  }
+
+  if (/^[A-Za-z0-9_-]+$/.test(value) && (value.includes('-') || value.includes('_'))) {
+    value = value.replace(/-/g, '+').replace(/_/g, '/');
+  }
+
+  const mod = value.length % 4;
+  if (mod) {
+    value = value + '='.repeat(4 - mod);
+  }
+
+  if (/^[A-Za-z0-9+/=]+$/.test(value)) {
+    return toPemFromBase64PrivateKey(value);
+  }
+
+  return value;
+}
+
+function validateGooglePrivateKey(privateKeyPem) {
+  if (!privateKeyPem) {
+    throw new Error('Missing GOOGLE_PRIVATE_KEY');
+  }
+
+  try {
+    crypto.createPrivateKey(privateKeyPem);
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    throw new Error(`Invalid GOOGLE_PRIVATE_KEY format. Ensure it is a PKCS8 PEM key (or base64 body) with proper newline escaping. Parse error: ${reason}`);
+  }
 }
 
 function sanitizeForSheet(value) {
@@ -81,6 +125,8 @@ function normalizePublicKey(rawKey) {
   if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
     value = value.slice(1, -1);
   }
+
+  value = value.replace(/\\n/g, '\n').trim();
 
   value = value.replace(/\\n/g, '\n').trim();
 
@@ -196,10 +242,12 @@ function extractRequestHints(rawBody) {
 const auth = new google.auth.GoogleAuth({
   credentials: {
     client_email: process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL,
-    private_key: toGooglePrivateKey(process.env.GOOGLE_PRIVATE_KEY)
+    private_key: normalizeGooglePrivateKey(process.env.GOOGLE_PRIVATE_KEY)
   },
   scopes: ['https://www.googleapis.com/auth/spreadsheets']
 });
+
+validateGooglePrivateKey(normalizeGooglePrivateKey(process.env.GOOGLE_PRIVATE_KEY));
 
 const sheets = google.sheets({ version: 'v4', auth });
 
