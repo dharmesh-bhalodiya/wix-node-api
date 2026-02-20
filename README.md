@@ -135,3 +135,19 @@ So every request is captured in logs, and only valid install events go to instal
 - `errorLine` stores the first stack location (`at ...:line:column`) for quick tracing.
 - `errorStack` stores a truncated stack trace for deeper debugging.
 - Control characters in request/error text are sanitized before writing to Sheets to reduce "invalid character" write issues.
+
+## Public key formatting fix (for `InvalidCharacterError`)
+
+If you see errors like:
+
+```text
+InvalidCharacterError: Invalid character
+at atob (...)
+```
+
+it usually means the Wix `publicKey` value is not in the expected format. This server now normalizes keys by:
+
+- converting escaped `\n` sequences to real newlines
+- accepting base64-encoded PEM and decoding it automatically
+
+Still, best practice is to provide full PEM text in `WIX_APPS_JSON` exactly as exported from Wix.

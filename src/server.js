@@ -38,6 +38,27 @@ function sanitizeForSheet(value) {
     .trim();
 }
 
+
+function normalizePublicKey(rawKey) {
+  const value = sanitizeForSheet(rawKey).replace(/\\n/g, "\n").trim();
+  if (!value) return value;
+
+  if (value.includes('BEGIN PUBLIC KEY')) {
+    return value;
+  }
+
+  try {
+    const decoded = Buffer.from(value, 'base64').toString('utf8').trim();
+    if (decoded.includes('BEGIN PUBLIC KEY')) {
+      return decoded;
+    }
+  } catch (_error) {
+    // ignore and fallback to raw value
+  }
+
+  return value;
+}
+
 function parseErrorContext(error) {
   if (!(error instanceof Error)) {
     return {
@@ -150,7 +171,7 @@ function createWixClient(appId, publicKey) {
 
 const secretToClientMap = Object.entries(wixApps).reduce((acc, [appId, config]) => {
   const appConfig = typeof config === 'string' ? { publicKey: config } : config;
-  const publicKey = appConfig.publicKey;
+  const publicKey = normalizePublicKey(appConfig.publicKey);
   const webhookSecret = appConfig.webhookSecret;
 
   if (!publicKey) {
