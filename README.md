@@ -186,7 +186,7 @@ WIX_APPS_JSON={"11c28482-01cc-4a0d-b1d5-0651e0fc0119":{"publicKey":"-----BEGIN P
 The server handles both identity types from webhook metadata:
 
 - `MEMBER`: tries Wix Members SDK lookup (`getMember` + query fallback)
-- `WIX_USER`: stores Wix user identity details directly and uses event-origin email/name fallback when available
+- `WIX_USER`: first tries Wix CRM Contacts lookup by `wixUserId`, then falls back to event-origin email/name
 
 Stored fields:
 
@@ -220,3 +220,6 @@ it usually means `GOOGLE_PRIVATE_KEY` is malformed in env config. This server no
 
 - Primary mapping uses webhook payload hints (`instanceId`, `originInstanceId`, `memberId`) to attach same numeric `requestId` in both sheets.
 - If event arrives without a match, service generates a fallback numeric `requestId` so `Installs` is never blank.
+
+
+> To resolve installer email for `WIX_USER`, ensure your Wix app has permissions/scopes for CRM Contacts read access.

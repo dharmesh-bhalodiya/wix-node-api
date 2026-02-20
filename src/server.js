@@ -7,6 +7,7 @@ const { google } = require('googleapis');
 const { createClient, AppStrategy } = require('@wix/sdk');
 const { appInstances } = require('@wix/app-management');
 const { members } = require('@wix/members');
+const { contacts } = require('@wix/crm');
 
 const app = express();
 const port = Number(process.env.PORT || 3000);
@@ -395,17 +396,94 @@ async function appendWebhookLog(entry) {
   ]);
 }
 
+async function extractContactDetails(contactLike) {
+  if (!contactLike) return null;
+  const contact = contactLike.contact || contactLike;
+  const info = contact.info || {};
+
+  const email =
+    contact?.primaryInfo?.email ||
+    info?.emails?.items?.[0]?.email ||
+    info?.emails?.[0]?.email ||
+    contact?.emails?.[0]?.email ||
+    '';
+
+  const name =
+    contact?.primaryInfo?.name ||
+    [info?.name?.first, info?.name?.last].filter(Boolean).join(' ').trim() ||
+    contact?.name ||
+    '';
+
+  if (!email && !name) return null;
+
+  return {
+    email,
+    name,
+    raw: JSON.stringify(contact)
+  };
+}
+
+async function queryContactByIdentity(client, identity) {
+  const wixUserId = identity?.wixUserId || '';
+  const memberId = identity?.memberId || '';
+
+  const candidateQueries = [
+    async () => {
+      const q = client.contacts?.queryContacts?.();
+      if (!q?.eq) return null;
+      const res = await q.eq('info.extendedFields.wixUserId', wixUserId).find();
+      return res?.items?.[0] || null;
+    },
+    async () => {
+      const q = client.contacts?.queryContacts?.();
+      if (!q?.eq) return null;
+      const res = await q.eq('info.extendedFields.memberId', memberId).find();
+      return res?.items?.[0] || null;
+    },
+    async () => {
+      const q = client.contacts?.queryContacts?.();
+      if (!q?.hasSome || !memberId) return null;
+      const res = await q.hasSome('info.extendedFields.memberId', [memberId]).find();
+      return res?.items?.[0] || null;
+    }
+  ];
+
+  for (const runQuery of candidateQueries) {
+    try {
+      const contact = await runQuery();
+      const details = await extractContactDetails(contact);
+      if (details?.email) {
+        return details;
+      }
+    } catch (_error) {
+      // continue
+    }
+  }
+
+  return null;
+}
+
 async function fetchIdentityDetails(client, identity) {
   const identityType = identity?.identityType || '';
   const memberId = identity?.memberId || '';
   const wixUserId = identity?.wixUserId || '';
+
+  const contactDetails = await queryContactByIdentity(client, identity);
+  if (contactDetails?.email) {
+    return {
+      email: contactDetails.email,
+      name: contactDetails.name || identity?.originatedName || '',
+      userId: memberId || wixUserId,
+      raw: contactDetails.raw
+    };
+  }
 
   if (identityType === 'WIX_USER') {
     return {
       email: identity?.originatedEmail || '',
       name: identity?.originatedName || '',
       userId: wixUserId,
-      raw: JSON.stringify({ identityType, wixUserId })
+      raw: JSON.stringify({ identityType, wixUserId, lookup: 'wix_user_no_contact_email' })
     };
   }
 
@@ -414,7 +492,7 @@ async function fetchIdentityDetails(client, identity) {
       email: identity?.originatedEmail || '',
       name: identity?.originatedName || '',
       userId: wixUserId || memberId,
-      raw: JSON.stringify({ identityType, memberId, wixUserId })
+      raw: JSON.stringify({ identityType, memberId, wixUserId, lookup: 'no_member_id' })
     };
   }
 
@@ -472,7 +550,7 @@ async function fetchIdentityDetails(client, identity) {
     email: identity?.originatedEmail || '',
     name: identity?.originatedName || '',
     userId: memberId,
-    raw: JSON.stringify({ identityType, memberId, wixUserId, lookup: 'not_found' })
+    raw: JSON.stringify({ identityType, memberId, wixUserId, lookup: 'member_not_found' })
   };
 }
 
@@ -482,7 +560,7 @@ function createWixClient(appId, publicKey) {
       appId,
       publicKey
     }),
-    modules: { appInstances, members }
+    modules: { appInstances, members, contacts }
   });
 
   client.appInstances.onAppInstanceInstalled(async (event) => {
