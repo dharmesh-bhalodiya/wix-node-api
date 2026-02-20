@@ -148,6 +148,26 @@ at atob (...)
 it usually means the Wix `publicKey` value is not in the expected format. This server now normalizes keys by:
 
 - converting escaped `\n` sequences to real newlines
-- accepting base64-encoded PEM and decoding it automatically
+- converting PEM blocks to base64 payload for Wix SDK parsing
+- normalizing base64url keys (`-`,`_`) to standard base64 with proper padding
 
-Still, best practice is to provide full PEM text in `WIX_APPS_JSON` exactly as exported from Wix.
+You can provide either full PEM or base64-style key in `WIX_APPS_JSON`; the server normalizes both.
+
+
+## Startup public-key self-check
+
+On startup, the server validates each normalized app public key and logs a summary:
+
+- `valid` boolean
+- `reason` if invalid
+- key `fingerprint` (short SHA-256 prefix)
+
+The same `publicKeyChecks` summary is exposed in `GET /healthz` for quick diagnostics.
+
+## Exact `.env` JSON example with your app/key
+
+Use this exact value for `WIX_APPS_JSON` (single line):
+
+```env
+WIX_APPS_JSON={"11c28482-01cc-4a0d-b1d5-0651e0fc0119":{"publicKey":"-----BEGIN PUBLIC KEY-----\nMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAprpllCqDfTtE29CKhrTL\n75fMSDzS49m+1ixnsJu3Pp0eukbOByR10Dqea5+lmSHKBpcOjSIfRUTbv4QU8yzp\nMwLIIo4UBaS8hdonscz8QJEmJuVoXJ9MSJmC0ZTdig5JFkxfbhJHo36aHOwPDOg/\nwCIwtR3iLnIdSt50G/8XNjzRHUmpBF+rVHgtWdcQLv+m3ajRl3IOL1kv9Hq2w7R7\ndYHCAQh9A2P20C4Bevpc++V9pzMACAXdezNGslpfrAIDTJpLTFaIQP/zkwAVE1DS\nF+CeiqxRqp624NkDOyGIkO3NgQz29uWOv372S/JOth3TiokXAu/KjSX1Vuom1VeZ\n7QIDAQAB\n-----END PUBLIC KEY-----","webhookSecret":"a6f9b2d7c1e843e7a10489cc"}}
+```

@@ -39,24 +39,81 @@ function sanitizeForSheet(value) {
 }
 
 
-function normalizePublicKey(rawKey) {
-  const value = sanitizeForSheet(rawKey).replace(/\\n/g, "\n").trim();
-  if (!value) return value;
+function toBase64FromPem(value) {
+  return value
+    .replace('-----BEGIN PUBLIC KEY-----', '')
+    .replace('-----END PUBLIC KEY-----', '')
+    .replace(/\s+/g, '');
+}
 
-  if (value.includes('BEGIN PUBLIC KEY')) {
-    return value;
+function normalizePublicKey(rawKey) {
+  let value = String(rawKey || '').trim();
+  if (!value) return '';
+
+  // Handle accidental JSON-stringified value, e.g. ""-----BEGIN...""
+  if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
+    value = value.slice(1, -1);
   }
 
-  try {
-    const decoded = Buffer.from(value, 'base64').toString('utf8').trim();
-    if (decoded.includes('BEGIN PUBLIC KEY')) {
-      return decoded;
-    }
-  } catch (_error) {
-    // ignore and fallback to raw value
+  value = value.replace(/\\n/g, '\n').trim();
+
+  // Wix SDK helper may attempt atob() on provided key; passing PEM directly can fail.
+  // Convert PEM to plain base64 body so atob() always gets valid characters.
+  if (value.includes('BEGIN PUBLIC KEY')) {
+    return toBase64FromPem(value);
+  }
+
+  // If it's base64url, convert to base64 before passing to SDK.
+  if (/^[A-Za-z0-9_-]+$/.test(value) && (value.includes('-') || value.includes('_'))) {
+    value = value.replace(/-/g, '+').replace(/_/g, '/');
+  }
+
+  // Add padding if missing.
+  const mod = value.length % 4;
+  if (mod) {
+    value = value + '='.repeat(4 - mod);
   }
 
   return value;
+}
+
+
+function toPemFromBase64(value) {
+  const chunks = value.match(/.{1,64}/g) || [];
+  return '-----BEGIN PUBLIC KEY-----\n' + chunks.join('\n') + '\n-----END PUBLIC KEY-----';
+}
+
+function validateNormalizedPublicKey(publicKey) {
+  if (!publicKey) {
+    return { valid: false, reason: 'empty_public_key', fingerprint: '' };
+  }
+
+  if (!/^[A-Za-z0-9+/=]+$/.test(publicKey)) {
+    return { valid: false, reason: 'non_base64_characters', fingerprint: '' };
+  }
+
+  try {
+    const decoded = Buffer.from(publicKey, 'base64');
+    if (!decoded.length) {
+      return { valid: false, reason: 'decoded_key_is_empty', fingerprint: '' };
+    }
+
+    // Validate key structure with Node crypto parser for early startup feedback.
+    const pem = toPemFromBase64(publicKey);
+    crypto.createPublicKey(pem);
+
+    return {
+      valid: true,
+      reason: '',
+      fingerprint: crypto.createHash('sha256').update(publicKey).digest('hex').slice(0, 16)
+    };
+  } catch (error) {
+    return {
+      valid: false,
+      reason: sanitizeForSheet(error instanceof Error ? error.message : String(error)),
+      fingerprint: ''
+    };
+  }
 }
 
 function parseErrorContext(error) {
@@ -169,6 +226,8 @@ function createWixClient(appId, publicKey) {
   return client;
 }
 
+const publicKeyChecks = [];
+
 const secretToClientMap = Object.entries(wixApps).reduce((acc, [appId, config]) => {
   const appConfig = typeof config === 'string' ? { publicKey: config } : config;
   const publicKey = normalizePublicKey(appConfig.publicKey);
@@ -182,6 +241,18 @@ const secretToClientMap = Object.entries(wixApps).reduce((acc, [appId, config]) 
   }
   if (acc[webhookSecret]) {
     throw new Error(`Duplicate webhookSecret found in WIX_APPS_JSON for app ${appId}`);
+  }
+
+  const keyValidation = validateNormalizedPublicKey(publicKey);
+  publicKeyChecks.push({
+    appId,
+    valid: keyValidation.valid,
+    reason: keyValidation.reason,
+    fingerprint: keyValidation.fingerprint
+  });
+
+  if (!keyValidation.valid) {
+    throw new Error(`Invalid publicKey for app ${appId}: ${keyValidation.reason}`);
   }
 
   acc[webhookSecret] = {
@@ -198,7 +269,8 @@ app.get('/healthz', (_req, res) => {
     configuredApps: Object.keys(secretToClientMap).length,
     webhookPathPattern: `${webhookBasePath}/:webhookSecret`,
     installsSheetName,
-    logsSheetName
+    logsSheetName,
+    publicKeyChecks
   });
 });
 
@@ -295,4 +367,5 @@ app.post(`${webhookBasePath}/:webhookSecret`, express.text({ type: '*/*', limit:
 
 app.listen(port, () => {
   console.log(`Webhook API listening on port ${port} path pattern ${webhookBasePath}/:webhookSecret`);
+  console.log('Public key validation summary', publicKeyChecks);
 });
