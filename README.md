@@ -183,12 +183,17 @@ WIX_APPS_JSON={"11c28482-01cc-4a0d-b1d5-0651e0fc0119":{"publicKey":"-----BEGIN P
 
 ## Member enrichment
 
-The server extracts `memberId` from webhook metadata/payload and attempts member lookup using Wix Members SDK module (`getMember` and query fallback).
-If resolved, it stores:
+The server handles both identity types from webhook metadata:
+
+- `MEMBER`: tries Wix Members SDK lookup (`getMember` + query fallback)
+- `WIX_USER`: stores Wix user identity details directly and uses event-origin email/name fallback when available
+
+Stored fields:
 
 - `userEmail` (owner/member email if available)
 - `userName`
-- `memberDetails` (full member JSON)
+- `userId` (`memberId` or `wixUserId`)
+- `memberDetails` (full member/identity JSON)
 
 If lookup fails, install row is still written with available event fields.
 

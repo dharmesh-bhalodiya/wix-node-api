@@ -239,7 +239,9 @@ function extractRequestHints(rawBody) {
   return {
     instanceId: metadata.instanceId || envelope.instanceId || dataSection.instanceId || '',
     originInstanceId: dataSection.originInstanceId || metadata.originInstanceId || '',
+    identityType: identity.identityType || '',
     memberId: identity.memberId || '',
+    wixUserId: identity.wixUserId || '',
     appId: dataSection.appId || envelope.appId || ''
   };
 }
@@ -298,11 +300,13 @@ function setPendingRequest(hints, requestId) {
   const record = {
     requestId,
     memberId: hints.memberId || '',
+    wixUserId: hints.wixUserId || '',
+    identityType: hints.identityType || '',
     appId: hints.appId || '',
     createdAt: Date.now()
   };
 
-  const keys = [hints.instanceId, hints.originInstanceId, hints.memberId].filter(Boolean);
+  const keys = [hints.instanceId, hints.originInstanceId, hints.memberId, hints.wixUserId].filter(Boolean);
   for (const key of keys) {
     pendingRequestsByKey.set(key, record);
   }
@@ -315,7 +319,9 @@ function getPendingRequest(event) {
     event?.data?.originInstanceId,
     event?.metadata?.originInstanceId,
     event?.metadata?.identity?.memberId,
-    event?.identity?.memberId
+    event?.identity?.memberId,
+    event?.metadata?.identity?.wixUserId,
+    event?.identity?.wixUserId
   ].filter(Boolean);
 
   for (const key of keys) {
@@ -334,7 +340,9 @@ function clearPendingRequest(event) {
     event?.data?.originInstanceId,
     event?.metadata?.originInstanceId,
     event?.metadata?.identity?.memberId,
-    event?.identity?.memberId
+    event?.identity?.memberId,
+    event?.metadata?.identity?.wixUserId,
+    event?.identity?.wixUserId
   ].filter(Boolean);
 
   for (const key of keys) {
@@ -387,9 +395,27 @@ async function appendWebhookLog(entry) {
   ]);
 }
 
-async function fetchMemberDetails(client, memberId) {
+async function fetchIdentityDetails(client, identity) {
+  const identityType = identity?.identityType || '';
+  const memberId = identity?.memberId || '';
+  const wixUserId = identity?.wixUserId || '';
+
+  if (identityType === 'WIX_USER') {
+    return {
+      email: identity?.originatedEmail || '',
+      name: identity?.originatedName || '',
+      userId: wixUserId,
+      raw: JSON.stringify({ identityType, wixUserId })
+    };
+  }
+
   if (!memberId) {
-    return { email: '', name: '', raw: '' };
+    return {
+      email: identity?.originatedEmail || '',
+      name: identity?.originatedName || '',
+      userId: wixUserId || memberId,
+      raw: JSON.stringify({ identityType, memberId, wixUserId })
+    };
   }
 
   const candidates = [
@@ -418,7 +444,8 @@ async function fetchMemberDetails(client, memberId) {
         member.primaryEmail,
         member?.contactDetails?.emails?.[0]?.email,
         member?.contact?.emails?.[0]?.email,
-        privacy?.email
+        privacy?.email,
+        identity?.originatedEmail
       ].filter(Boolean);
 
       const names = [
@@ -426,12 +453,14 @@ async function fetchMemberDetails(client, memberId) {
         profile.name,
         [profile.firstName, profile.lastName].filter(Boolean).join(' ').trim(),
         member.name,
-        member?.contact?.name
+        member?.contact?.name,
+        identity?.originatedName
       ].filter(Boolean);
 
       return {
         email: emails[0] || '',
         name: names[0] || '',
+        userId: memberId,
         raw: JSON.stringify(member)
       };
     } catch (_error) {
@@ -439,7 +468,12 @@ async function fetchMemberDetails(client, memberId) {
     }
   }
 
-  return { email: '', name: '', raw: '' };
+  return {
+    email: identity?.originatedEmail || '',
+    name: identity?.originatedName || '',
+    userId: memberId,
+    raw: JSON.stringify({ identityType, memberId, wixUserId, lookup: 'not_found' })
+  };
 }
 
 function createWixClient(appId, publicKey) {
@@ -455,13 +489,27 @@ function createWixClient(appId, publicKey) {
     const instanceId = event?.metadata?.instanceId || event?.instanceId || '';
     const pending = getPendingRequest(event);
 
-    const memberId =
-      event?.metadata?.identity?.memberId ||
-      event?.identity?.memberId ||
-      pending?.memberId ||
-      '';
+    const identity = {
+      identityType:
+        event?.metadata?.identity?.identityType ||
+        event?.identity?.identityType ||
+        pending?.identityType ||
+        '',
+      memberId:
+        event?.metadata?.identity?.memberId ||
+        event?.identity?.memberId ||
+        pending?.memberId ||
+        '',
+      wixUserId:
+        event?.metadata?.identity?.wixUserId ||
+        event?.identity?.wixUserId ||
+        pending?.wixUserId ||
+        '',
+      originatedEmail: event?.originatedFrom?.userEmail || event?.metadata?.userEmail || '',
+      originatedName: event?.originatedFrom?.userName || ''
+    };
 
-    const memberDetails = await fetchMemberDetails(client, memberId);
+    const memberDetails = await fetchIdentityDetails(client, identity);
 
     const entry = {
       requestId: pending?.requestId || await getNextRequestId(),
@@ -472,7 +520,7 @@ function createWixClient(appId, publicKey) {
       instanceId,
       userEmail: memberDetails.email || event?.originatedFrom?.userEmail || event?.metadata?.userEmail || '',
       userName: memberDetails.name || '',
-      userId: memberId || event?.originatedFrom?.userId || event?.metadata?.userId || '',
+      userId: memberDetails.userId || event?.originatedFrom?.userId || event?.metadata?.userId || '',
       memberDetails: memberDetails.raw,
       region: event?.originatedFrom?.metaSiteRegion || '',
       rawPayload: JSON.stringify(event)
