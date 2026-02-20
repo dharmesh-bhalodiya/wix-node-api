@@ -6,6 +6,7 @@ const helmet = require('helmet');
 const { google } = require('googleapis');
 const { createClient, AppStrategy } = require('@wix/sdk');
 const { appInstances } = require('@wix/app-management');
+const { members } = require('@wix/members');
 
 const app = express();
 const port = Number(process.env.PORT || 3000);
@@ -23,7 +24,6 @@ if (!Object.keys(wixApps).length) {
   throw new Error('WIX_APPS_JSON must include at least 1 app configuration');
 }
 
-
 function parseWixAppsConfig(rawValue) {
   const value = String(rawValue || '').trim();
 
@@ -31,7 +31,6 @@ function parseWixAppsConfig(rawValue) {
     throw new Error('Missing WIX_APPS_JSON configuration');
   }
 
-  // Common Render mistake: pasting `WIX_APPS_JSON={...}` as value.
   const jsonCandidate = value.startsWith('WIX_APPS_JSON=')
     ? value.slice('WIX_APPS_JSON='.length).trim()
     : value;
@@ -53,7 +52,7 @@ app.use(helmet());
 
 function toGooglePrivateKey(rawKey) {
   if (!rawKey) return rawKey;
-  return rawKey.replace(/\\n/g, '\n');
+  return rawKey.replace(/\n/g, '\n');
 }
 
 function sanitizeForSheet(value) {
@@ -62,7 +61,6 @@ function sanitizeForSheet(value) {
     .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, ' ')
     .trim();
 }
-
 
 function toBase64FromPem(value) {
   return value
@@ -80,24 +78,20 @@ function normalizePublicKey(rawKey) {
   let value = String(rawKey || '').trim();
   if (!value) return '';
 
-  // Handle accidental JSON-stringified value, e.g. ""-----BEGIN...""
   if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
     value = value.slice(1, -1);
   }
 
   value = value.replace(/\\n/g, '\n').trim();
 
-  // Keep SPKI PEM for jose/importSPKI compatibility.
   if (value.includes('BEGIN PUBLIC KEY')) {
     return value;
   }
 
-  // If key is base64url/base64 body, convert it into PEM.
   if (/^[A-Za-z0-9_-]+$/.test(value) && (value.includes('-') || value.includes('_'))) {
     value = value.replace(/-/g, '+').replace(/_/g, '/');
   }
 
-  // Add padding if missing.
   const mod = value.length % 4;
   if (mod) {
     value = value + '='.repeat(4 - mod);
@@ -116,7 +110,6 @@ function validateNormalizedPublicKey(publicKey) {
   }
 
   try {
-    // Validate key structure with Node crypto parser for early startup feedback.
     const normalizedPem = publicKey.includes('BEGIN PUBLIC KEY')
       ? publicKey
       : toPemFromBase64(toBase64FromPem(publicKey));
@@ -159,6 +152,47 @@ function parseErrorContext(error) {
   };
 }
 
+function decodeJwtPayload(rawBody) {
+  try {
+    const [, payloadPart] = String(rawBody || '').split('.');
+    if (!payloadPart) return null;
+    const payloadText = Buffer.from(payloadPart, 'base64url').toString('utf8');
+    return JSON.parse(payloadText);
+  } catch (_error) {
+    return null;
+  }
+}
+
+function extractRequestHints(rawBody) {
+  const payload = decodeJwtPayload(rawBody);
+  if (!payload) return { instanceId: '', memberId: '' };
+
+  let eventEnvelope = payload.data;
+  if (typeof eventEnvelope === 'string') {
+    try {
+      eventEnvelope = JSON.parse(eventEnvelope);
+    } catch (_error) {
+      eventEnvelope = {};
+    }
+  }
+
+  let metadata = eventEnvelope?.metadata || {};
+  if (typeof metadata === 'string') {
+    try {
+      metadata = JSON.parse(metadata);
+    } catch (_error) {
+      metadata = {};
+    }
+  }
+
+  const identity = metadata?.identity || {};
+
+  return {
+    instanceId: metadata?.instanceId || '',
+    memberId: identity?.memberId || ''
+  };
+}
+
 const auth = new google.auth.GoogleAuth({
   credentials: {
     client_email: process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL,
@@ -168,6 +202,43 @@ const auth = new google.auth.GoogleAuth({
 });
 
 const sheets = google.sheets({ version: 'v4', auth });
+
+let requestCounter = null;
+let counterQueue = Promise.resolve();
+const pendingRequestsByInstance = new Map();
+
+async function initializeRequestCounter() {
+  if (requestCounter !== null) {
+    return;
+  }
+
+  const result = await sheets.spreadsheets.values.get({
+    spreadsheetId,
+    range: `${logsSheetName}!A:A`
+  });
+
+  const values = result.data.values || [];
+  let max = 0;
+  for (const row of values) {
+    const value = Number.parseInt(String(row?.[0] || '').trim(), 10);
+    if (!Number.isNaN(value) && value > max) {
+      max = value;
+    }
+  }
+
+  requestCounter = max;
+}
+
+function getNextRequestId() {
+  const nextTask = counterQueue.then(async () => {
+    await initializeRequestCounter();
+    requestCounter += 1;
+    return String(requestCounter);
+  });
+
+  counterQueue = nextTask.then(() => undefined, () => undefined);
+  return nextTask;
+}
 
 async function appendRow(sheetName, row) {
   await sheets.spreadsheets.values.append({
@@ -189,7 +260,9 @@ async function appendInstallRow(entry) {
     entry.siteId,
     entry.instanceId,
     entry.userEmail,
+    entry.userName,
     entry.userId,
+    entry.memberDetails,
     entry.region,
     entry.rawPayload
   ]);
@@ -212,35 +285,84 @@ async function appendWebhookLog(entry) {
   ]);
 }
 
+async function fetchMemberDetails(client, memberId) {
+  if (!memberId) {
+    return { email: '', name: '', raw: '' };
+  }
+
+  const apiCandidates = [
+    () => client.members?.getMember?.(memberId),
+    () => client.members?.getMember?.({ memberId }),
+    () => client.members?.getMember?.({ id: memberId })
+  ];
+
+  for (const tryCall of apiCandidates) {
+    try {
+      const response = await tryCall();
+      if (!response) continue;
+      const member = response.member || response;
+      const profile = member.profile || member.contact || {};
+      const name = profile.nickname || profile.name || profile.firstName || member.name || '';
+      const email = profile.email || member.loginEmail || member.primaryEmail || '';
+      return {
+        email,
+        name,
+        raw: JSON.stringify(member)
+      };
+    } catch (_error) {
+      // Try next candidate silently.
+    }
+  }
+
+  return { email: '', name: '', raw: '' };
+}
+
 function createWixClient(appId, publicKey) {
   const client = createClient({
     auth: AppStrategy({
       appId,
       publicKey
     }),
-    modules: { appInstances }
+    modules: { appInstances, members }
   });
 
   client.appInstances.onAppInstanceInstalled(async (event) => {
+    const instanceId = event?.metadata?.instanceId || '';
+    const pending = pendingRequestsByInstance.get(instanceId);
+
+    const memberId =
+      event?.metadata?.identity?.memberId ||
+      event?.identity?.memberId ||
+      pending?.memberId ||
+      '';
+
+    const memberDetails = await fetchMemberDetails(client, memberId);
+
     const entry = {
-      requestId: event?.metadata?.eventId || '',
+      requestId: pending?.requestId || '',
       receivedAt: new Date().toISOString(),
       eventName: 'APP_INSTANCE_INSTALLED',
       appId,
       siteId: event?.metadata?.siteId || '',
-      instanceId: event?.metadata?.instanceId || '',
-      userEmail: event?.originatedFrom?.userEmail || event?.metadata?.userEmail || '',
-      userId: event?.originatedFrom?.userId || event?.metadata?.userId || '',
+      instanceId,
+      userEmail: memberDetails.email || event?.originatedFrom?.userEmail || event?.metadata?.userEmail || '',
+      userName: memberDetails.name || '',
+      userId: memberId || event?.originatedFrom?.userId || event?.metadata?.userId || '',
+      memberDetails: memberDetails.raw,
       region: event?.originatedFrom?.metaSiteRegion || '',
       rawPayload: JSON.stringify(event)
     };
 
     try {
       await appendInstallRow(entry);
-      console.log('Stored install event', { appId, instanceId: entry.instanceId });
+      console.log('Stored install event', { appId, instanceId: entry.instanceId, requestId: entry.requestId });
     } catch (error) {
       const errorContext = parseErrorContext(error);
       console.error('Failed to append install row', { appId, ...errorContext });
+    } finally {
+      if (instanceId) {
+        pendingRequestsByInstance.delete(instanceId);
+      }
     }
   });
 
@@ -296,9 +418,18 @@ app.get('/healthz', (_req, res) => {
 });
 
 app.post(`${webhookBasePath}/:webhookSecret`, express.text({ type: '*/*', limit: '100kb' }), async (req, res) => {
-  const requestId = crypto.randomUUID();
+  const requestId = await getNextRequestId();
   const rawBody = req.body || '';
   const webhookSecret = req.params.webhookSecret || '';
+  const hints = extractRequestHints(rawBody);
+
+  if (hints.instanceId) {
+    pendingRequestsByInstance.set(hints.instanceId, {
+      requestId,
+      memberId: hints.memberId,
+      createdAt: Date.now()
+    });
+  }
 
   let matchedAppId = '';
   let httpStatus = 401;

@@ -35,16 +35,18 @@ Create one spreadsheet with two tabs.
 ### Tab A: `Installs`
 Header row:
 
-1. `requestId`
+1. `requestId` (numeric sequence shared with `WebhookLogs`)
 2. `receivedAt`
 3. `eventName`
 4. `appId`
 5. `siteId`
 6. `instanceId`
 7. `userEmail`
-8. `userId`
-9. `region`
-10. `rawPayload`
+8. `userName`
+9. `userId` (memberId)
+10. `memberDetails` (full JSON)
+11. `region`
+12. `rawPayload`
 
 ### Tab B: `WebhookLogs`
 Header row:
@@ -131,6 +133,7 @@ So every request is captured in logs, and only valid install events go to instal
 
 ## Debugging notes
 
+- `requestId` is generated as incrementing numeric ID from `WebhookLogs` last row and reused in `Installs` for same webhook request.
 - `failureStep` tells which part failed (`resolve_secret`, `wix_webhook_process`, etc.).
 - `errorLine` stores the first stack location (`at ...:line:column`) for quick tracing.
 - `errorStack` stores a truncated stack trace for deeper debugging.
@@ -176,3 +179,15 @@ Use this exact value for `WIX_APPS_JSON` (single line):
 ```env
 WIX_APPS_JSON={"11c28482-01cc-4a0d-b1d5-0651e0fc0119":{"publicKey":"-----BEGIN PUBLIC KEY-----\nMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAprpllCqDfTtE29CKhrTL\n75fMSDzS49m+1ixnsJu3Pp0eukbOByR10Dqea5+lmSHKBpcOjSIfRUTbv4QU8yzp\nMwLIIo4UBaS8hdonscz8QJEmJuVoXJ9MSJmC0ZTdig5JFkxfbhJHo36aHOwPDOg/\nwCIwtR3iLnIdSt50G/8XNjzRHUmpBF+rVHgtWdcQLv+m3ajRl3IOL1kv9Hq2w7R7\ndYHCAQh9A2P20C4Bevpc++V9pzMACAXdezNGslpfrAIDTJpLTFaIQP/zkwAVE1DS\nF+CeiqxRqp624NkDOyGIkO3NgQz29uWOv372S/JOth3TiokXAu/KjSX1Vuom1VeZ\n7QIDAQAB\n-----END PUBLIC KEY-----","webhookSecret":"a6f9b2d7c1e843e7a10489cc"}}
 ```
+
+
+## Member enrichment
+
+The server extracts `memberId` from webhook metadata and attempts member lookup using Wix Members SDK module.
+If resolved, it stores:
+
+- `userEmail`
+- `userName`
+- `memberDetails` (full member JSON)
+
+If lookup fails, install row is still written with available event fields.
