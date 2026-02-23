@@ -1,6 +1,5 @@
 require('dotenv').config();
 
-const crypto = require('crypto');
 const express = require('express');
 const helmet = require('helmet');
 const axios = require('axios');
@@ -234,16 +233,10 @@ app.post(
 
       appId = configured.appId;
 
-      await configured.client.webhooks.process(rawBody);
+      // THIS LINE IS YOUR ORIGINAL WORKING FLOW
+      const webhookData = await configured.client.webhooks.process(rawBody);
 
-      const payload = JSON.parse(
-        Buffer.from(rawBody.split('.')[1], 'base64url').toString()
-      );
-
-      instanceId =
-        payload?.data?.instanceId ||
-        payload?.metadata?.instanceId ||
-        '';
+      instanceId = webhookData?.data?.instanceId || '';
 
       let ownerEmail = '';
       let ownerName = '';
