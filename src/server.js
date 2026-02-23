@@ -8,6 +8,7 @@ const { createClient, AppStrategy } = require('@wix/sdk');
 const { appInstances } = require('@wix/app-management');
 const { members } = require('@wix/members');
 const { contacts } = require('@wix/crm');
+const { users } = require('@wix/users');
 
 const app = express();
 const port = Number(process.env.PORT || 3000);
@@ -375,6 +376,7 @@ async function appendInstallRow(entry) {
     entry.userId,
     entry.memberDetails,
     entry.region,
+    entry.websiteDomain,
     entry.rawPayload
   ]);
 }
@@ -464,6 +466,112 @@ async function queryContactByIdentity(client, identity) {
 }
 
 
+
+function findFirstEmailDeep(input, depth = 0, seen = new Set()) {
+  if (!input || depth > 6) return '';
+  if (typeof input === 'string') {
+    return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(input) ? input : '';
+  }
+  if (typeof input !== 'object') return '';
+  if (seen.has(input)) return '';
+  seen.add(input);
+
+  const directFields = ['email', 'loginEmail', 'primaryEmail', 'ownerEmail', 'siteOwnerEmail'];
+  for (const field of directFields) {
+    const value = input[field];
+    if (typeof value === 'string' && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value)) {
+      return value;
+    }
+  }
+
+  for (const value of Object.values(input)) {
+    if (Array.isArray(value)) {
+      for (const item of value) {
+        const found = findFirstEmailDeep(item, depth + 1, seen);
+        if (found) return found;
+      }
+      continue;
+    }
+
+    const found = findFirstEmailDeep(value, depth + 1, seen);
+    if (found) return found;
+  }
+
+  return '';
+}
+
+function findFirstNameDeep(input, depth = 0, seen = new Set()) {
+  if (!input || depth > 6 || typeof input !== 'object') return '';
+  if (seen.has(input)) return '';
+  seen.add(input);
+
+  const directFields = ['name', 'fullName', 'displayName', 'ownerName', 'siteOwnerName'];
+  for (const field of directFields) {
+    const value = input[field];
+    if (typeof value === 'string' && value.trim()) {
+      return value.trim();
+    }
+  }
+
+  const first = typeof input.firstName === 'string' ? input.firstName.trim() : '';
+  const last = typeof input.lastName === 'string' ? input.lastName.trim() : '';
+  if (first || last) return [first, last].filter(Boolean).join(' ');
+
+  for (const value of Object.values(input)) {
+    if (Array.isArray(value)) {
+      for (const item of value) {
+        const found = findFirstNameDeep(item, depth + 1, seen);
+        if (found) return found;
+      }
+      continue;
+    }
+
+    const found = findFirstNameDeep(value, depth + 1, seen);
+    if (found) return found;
+  }
+
+  return '';
+}
+
+
+function findFirstDomainDeep(input, depth = 0, seen = new Set()) {
+  if (!input || depth > 6) return '';
+
+  if (typeof input === 'string') {
+    const trimmed = input.trim();
+    const domainLike = trimmed.match(/^(?:https?:\/\/)?([a-z0-9.-]+\.[a-z]{2,})(?:[/:?#]|$)/i);
+    return domainLike ? domainLike[1].toLowerCase() : '';
+  }
+
+  if (typeof input !== 'object') return '';
+  if (seen.has(input)) return '';
+  seen.add(input);
+
+  const directFields = ['domain', 'siteDomain', 'primaryDomain', 'url', 'siteUrl', 'homepage'];
+  for (const field of directFields) {
+    const value = input[field];
+    if (typeof value === 'string') {
+      const found = findFirstDomainDeep(value, depth + 1, seen);
+      if (found) return found;
+    }
+  }
+
+  for (const value of Object.values(input)) {
+    if (Array.isArray(value)) {
+      for (const item of value) {
+        const found = findFirstDomainDeep(item, depth + 1, seen);
+        if (found) return found;
+      }
+      continue;
+    }
+
+    const found = findFirstDomainDeep(value, depth + 1, seen);
+    if (found) return found;
+  }
+
+  return '';
+}
+
 function pickFirstNonEmpty(values) {
   for (const value of values) {
     if (value) return value;
@@ -491,14 +599,16 @@ function extractOwnerDetails(source) {
     owner?.contact?.email,
     owner?.contactInfo?.email,
     source?.siteOwnerEmail,
-    source?.ownerEmail
+    source?.ownerEmail,
+    findFirstEmailDeep(source)
   ]);
 
   const name = pickFirstNonEmpty([
     owner?.name,
     [owner?.firstName, owner?.lastName].filter(Boolean).join(' ').trim(),
     source?.siteOwnerName,
-    source?.ownerName
+    source?.ownerName,
+    findFirstNameDeep(source)
   ]);
 
   if (!email && !name) return null;
@@ -507,6 +617,7 @@ function extractOwnerDetails(source) {
     email,
     name,
     userId: pickFirstNonEmpty([owner?.id, owner?.userId, owner?.wixUserId]),
+    websiteDomain: pickFirstNonEmpty([source?.siteDomain, source?.primaryDomain, findFirstDomainDeep(source)]),
     raw: JSON.stringify(source)
   };
 }
@@ -538,6 +649,57 @@ async function fetchOwnerDetailsFromAppInstance(client, identity) {
   return null;
 }
 
+
+async function fetchWixUserDetails(client, wixUserId) {
+  if (!wixUserId) return null;
+
+  const calls = [
+    async () => client.users?.getUser?.(wixUserId),
+    async () => client.users?.getUser?.({ id: wixUserId }),
+    async () => client.users?.getUser?.({ userId: wixUserId }),
+    async () => {
+      const q = client.users?.queryUsers?.();
+      if (!q?.hasSome) return null;
+      const res = await q.hasSome('id', [wixUserId]).find();
+      return res?.items?.[0] || null;
+    }
+  ];
+
+  for (const call of calls) {
+    try {
+      const response = await call();
+      if (!response) continue;
+      const user = response.user || response;
+      const email =
+        user?.email ||
+        user?.loginEmail ||
+        user?.primaryEmail ||
+        user?.contact?.email ||
+        user?.profile?.email ||
+        '';
+
+      const name =
+        user?.name ||
+        user?.profile?.nickname ||
+        [user?.profile?.firstName, user?.profile?.lastName].filter(Boolean).join(' ').trim() ||
+        '';
+
+      if (email || name) {
+        return {
+          email,
+          name,
+          userId: wixUserId,
+          raw: JSON.stringify(user)
+        };
+      }
+    } catch (_error) {
+      // continue
+    }
+  }
+
+  return null;
+}
+
 async function fetchIdentityDetails(client, identity) {
   const identityType = identity?.identityType || '';
   const memberId = identity?.memberId || '';
@@ -548,12 +710,22 @@ async function fetchIdentityDetails(client, identity) {
     return ownerDetails;
   }
 
+  const wixUserDetails = await fetchWixUserDetails(client, wixUserId);
+  if (wixUserDetails?.email) {
+    return {
+      ...wixUserDetails,
+      websiteDomain: identity?.websiteDomain || '',
+      raw: wixUserDetails.raw
+    };
+  }
+
   const contactDetails = await queryContactByIdentity(client, identity);
   if (contactDetails?.email) {
     return {
       email: contactDetails.email,
       name: contactDetails.name || identity?.originatedName || '',
       userId: memberId || wixUserId,
+      websiteDomain: identity?.websiteDomain || '',
       raw: contactDetails.raw
     };
   }
@@ -563,7 +735,8 @@ async function fetchIdentityDetails(client, identity) {
       email: identity?.originatedEmail || '',
       name: identity?.originatedName || '',
       userId: wixUserId,
-      raw: JSON.stringify({ identityType, wixUserId, lookup: 'wix_user_no_contact_email' })
+      websiteDomain: identity?.websiteDomain || '',
+      raw: JSON.stringify({ identityType, wixUserId, lookup: 'wix_user_no_contact_email', note: 'No email in appInstance owner/admin, Users API, or CRM contact result. Verify Wix scopes for Users/Contacts/App Instance data.' })
     };
   }
 
@@ -572,7 +745,8 @@ async function fetchIdentityDetails(client, identity) {
       email: identity?.originatedEmail || '',
       name: identity?.originatedName || '',
       userId: wixUserId || memberId,
-      raw: JSON.stringify({ identityType, memberId, wixUserId, lookup: 'no_member_id' })
+      websiteDomain: identity?.websiteDomain || '',
+      raw: JSON.stringify({ identityType, memberId, wixUserId, lookup: 'no_member_id', note: 'Neither memberId nor resolvable contact email found.' })
     };
   }
 
@@ -619,6 +793,7 @@ async function fetchIdentityDetails(client, identity) {
         email: emails[0] || '',
         name: names[0] || '',
         userId: memberId,
+        websiteDomain: identity?.websiteDomain || '',
         raw: JSON.stringify(member)
       };
     } catch (_error) {
@@ -630,7 +805,8 @@ async function fetchIdentityDetails(client, identity) {
     email: identity?.originatedEmail || '',
     name: identity?.originatedName || '',
     userId: memberId,
-    raw: JSON.stringify({ identityType, memberId, wixUserId, lookup: 'member_not_found' })
+    websiteDomain: identity?.websiteDomain || '',
+    raw: JSON.stringify({ identityType, memberId, wixUserId, lookup: 'member_not_found', note: 'Member and contact lookups did not return an email.' })
   };
 }
 
@@ -640,7 +816,7 @@ function createWixClient(appId, publicKey) {
       appId,
       publicKey
     }),
-    modules: { appInstances, members, contacts }
+    modules: { appInstances, members, contacts, users }
   });
 
   client.appInstances.onAppInstanceInstalled(async (event) => {
@@ -666,7 +842,12 @@ function createWixClient(appId, publicKey) {
       originatedEmail: event?.originatedFrom?.userEmail || event?.metadata?.userEmail || '',
       originatedName: event?.originatedFrom?.userName || '',
       instanceId: event?.metadata?.instanceId || event?.instanceId || '',
-      originInstanceId: event?.data?.originInstanceId || event?.metadata?.originInstanceId || ''
+      originInstanceId: event?.data?.originInstanceId || event?.metadata?.originInstanceId || '',
+      websiteDomain:
+        event?.metadata?.siteDomain ||
+        event?.site?.domain ||
+        event?.originatedFrom?.domain ||
+        ''
     };
 
     const memberDetails = await fetchIdentityDetails(client, identity);
@@ -683,6 +864,7 @@ function createWixClient(appId, publicKey) {
       userId: memberDetails.userId || event?.originatedFrom?.userId || event?.metadata?.userId || '',
       memberDetails: memberDetails.raw,
       region: event?.originatedFrom?.metaSiteRegion || '',
+      websiteDomain: memberDetails.websiteDomain || identity.websiteDomain || '',
       rawPayload: JSON.stringify(event)
     };
 

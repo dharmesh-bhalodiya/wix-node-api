@@ -46,7 +46,8 @@ Header row:
 9. `userId` (memberId)
 10. `memberDetails` (full JSON)
 11. `region`
-12. `rawPayload`
+12. `websiteDomain`
+13. `rawPayload`
 
 ### Tab B: `WebhookLogs`
 Header row:
@@ -186,7 +187,7 @@ WIX_APPS_JSON={"11c28482-01cc-4a0d-b1d5-0651e0fc0119":{"publicKey":"-----BEGIN P
 The server handles both identity types from webhook metadata:
 
 - `MEMBER`: tries Wix Members SDK lookup (`getMember` + query fallback)
-- `WIX_USER`: first tries App Instance owner/admin details, then Wix CRM Contacts lookup by `wixUserId`, then falls back to event-origin email/name
+- `WIX_USER`: tries App Instance owner/admin details, then Wix Users API by `wixUserId`, then Wix CRM Contacts, then event-origin fallback
 
 Stored fields:
 
@@ -194,6 +195,7 @@ Stored fields:
 - `userName`
 - `userId` (`memberId` or `wixUserId`)
 - `memberDetails` (full member/identity JSON)
+- `websiteDomain` (if available from app instance/event context)
 
 If lookup fails, install row is still written with available event fields.
 
@@ -223,3 +225,6 @@ it usually means `GOOGLE_PRIVATE_KEY` is malformed in env config. This server no
 
 
 > To resolve installer email for `WIX_USER`, ensure your Wix app has permissions/scopes for CRM Contacts read access.
+
+
+> If `memberDetails.lookup` is `wix_user_no_contact_email`, Wix did not expose installer email in app-instance owner/admin data or CRM contact APIs for that identity. In that case enable/check required Wix permissions and privacy settings for contacts/owner data.
