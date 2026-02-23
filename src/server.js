@@ -3,7 +3,7 @@ require('dotenv').config();
 const crypto = require('crypto');
 const express = require('express');
 const helmet = require('helmet');
-const axios = require('axios'); // ✅ NEW
+const axios = require('axios');
 const { google } = require('googleapis');
 const { createClient, AppStrategy } = require('@wix/sdk');
 const { appInstances } = require('@wix/app-management');
@@ -28,7 +28,7 @@ if (!spreadsheetId) {
 }
 
 /* ============================================================
-   GOOGLE PRIVATE KEY NORMALIZATION (UNCHANGED)
+   GOOGLE PRIVATE KEY NORMALIZATION
 ============================================================ */
 
 function normalizeGooglePrivateKey(rawKey) {
@@ -46,7 +46,7 @@ const auth = new google.auth.GoogleAuth({
 const sheets = google.sheets({ version: 'v4', auth });
 
 /* ============================================================
-   SANITIZER (UNCHANGED)
+   SANITIZER
 ============================================================ */
 
 function sanitizeForSheet(value) {
@@ -57,7 +57,7 @@ function sanitizeForSheet(value) {
 }
 
 /* ============================================================
-   REQUEST COUNTER (UNCHANGED)
+   REQUEST COUNTER
 ============================================================ */
 
 let requestCounter = null;
@@ -96,7 +96,7 @@ function getNextRequestId() {
 }
 
 /* ============================================================
-   APPEND HELPERS (UNCHANGED)
+   APPEND HELPERS
 ============================================================ */
 
 async function appendRow(sheetName, row) {
@@ -146,40 +146,60 @@ async function appendWebhookLog(entry) {
 }
 
 /* ============================================================
-   🔵 NEW: OAUTH OWNER FETCH
+   ✅ FIXED OAUTH OWNER FETCH (Correct Endpoint)
 ============================================================ */
 
 async function fetchOwnerFromOAuth(appId, appSecret, instanceId) {
-  const tokenResponse = await axios.post(
-    'https://www.wixapis.com/oauth2/token',
-    {
-      grant_type: 'client_credentials',
-      client_id: appId,
-      client_secret: appSecret,
-      instance_id: instanceId
-    },
-    { headers: { 'Content-Type': 'application/json' } }
-  );
+  try {
+    const tokenResponse = await axios.post(
+      'https://www.wixapis.com/oauth2/token',
+      {
+        grant_type: 'client_credentials',
+        client_id: appId,
+        client_secret: appSecret,
+        instance_id: instanceId
+      },
+      { headers: { 'Content-Type': 'application/json' } }
+    );
 
-  const accessToken = tokenResponse.data.access_token;
+    const accessToken = tokenResponse.data?.access_token;
 
-  const instanceResponse = await axios.get(
-    `https://www.wixapis.com/apps/v1/app-instances/${instanceId}`,
-    { headers: { Authorization: `Bearer ${accessToken}` } }
-  );
+    if (!accessToken) {
+      throw new Error('OAuth token not returned');
+    }
 
-  const appInstance = instanceResponse.data;
+    const instanceResponse = await axios.get(
+      'https://www.wixapis.com/apps/v1/instance',
+      { headers: { Authorization: `Bearer ${accessToken}` } }
+    );
 
-  return {
-    email: appInstance?.site?.ownerInfo?.email || '',
-    name: appInstance?.site?.ownerInfo?.name || '',
-    websiteDomain: appInstance?.site?.domain || '',
-    raw: JSON.stringify(appInstance)
-  };
+    const appInstance = instanceResponse.data;
+
+    return {
+      email: appInstance?.site?.ownerInfo?.email || '',
+      name: appInstance?.site?.ownerInfo?.name || '',
+      websiteDomain: appInstance?.site?.domain || '',
+      raw: JSON.stringify(appInstance)
+    };
+  } catch (error) {
+    console.error(
+      'Owner fetch error:',
+      error.response?.data || error.message
+    );
+
+    return {
+      email: '',
+      name: '',
+      websiteDomain: '',
+      raw: JSON.stringify({
+        error: error.response?.data || error.message
+      })
+    };
+  }
 }
 
 /* ============================================================
-   🔵 REPLACED: fetchIdentityDetails (ONLY CHANGE)
+   IDENTITY DETAILS (ONLY OWNER LOGIC)
 ============================================================ */
 
 async function fetchIdentityDetails(client, identity, appId) {
@@ -193,13 +213,7 @@ async function fetchIdentityDetails(client, identity, appId) {
     const appSecret = appConfig?.appSecret;
 
     if (!instanceId || !appSecret) {
-      return {
-        email: '',
-        name: '',
-        userId: '',
-        websiteDomain: '',
-        raw: JSON.stringify({ error: 'Missing instanceId or appSecret' })
-      };
+      throw new Error('Missing instanceId or appSecret');
     }
 
     const owner = await fetchOwnerFromOAuth(
@@ -216,6 +230,8 @@ async function fetchIdentityDetails(client, identity, appId) {
       raw: owner.raw
     };
   } catch (error) {
+    console.error('Identity fetch error:', error.message);
+
     return {
       email: '',
       name: '',
@@ -227,7 +243,7 @@ async function fetchIdentityDetails(client, identity, appId) {
 }
 
 /* ============================================================
-   WIX CLIENT INITIALIZATION (UNCHANGED)
+   WIX CLIENT INITIALIZATION
 ============================================================ */
 
 function createWixClient(appId, publicKey) {
@@ -279,7 +295,7 @@ function createWixClient(appId, publicKey) {
 }
 
 /* ============================================================
-   SECRET MAP (UNCHANGED except appSecret required)
+   SECRET MAP
 ============================================================ */
 
 const secretToClientMap = Object.entries(wixApps).reduce(
@@ -294,7 +310,7 @@ const secretToClientMap = Object.entries(wixApps).reduce(
 );
 
 /* ============================================================
-   WEBHOOK ROUTE (UNCHANGED)
+   WEBHOOK ROUTE (FIXED matchedAppId logging)
 ============================================================ */
 
 app.disable('x-powered-by');
@@ -311,27 +327,33 @@ app.post(
     let status = 'FAILED';
     let httpStatus = 401;
     let errorMessage = '';
+    let matchedAppId = '';
 
     try {
       const configured = secretToClientMap[webhookSecret];
+
       if (!configured) {
-        return res.status(403).json({ error: 'Unknown webhook secret' });
+        httpStatus = 403;
+        throw new Error('Unknown webhook secret');
       }
+
+      matchedAppId = configured.appId;
 
       await configured.client.webhooks.process(rawBody);
 
       status = 'SUCCESS';
       httpStatus = 200;
+
       return res.status(200).send();
     } catch (error) {
       errorMessage = error.message;
-      return res.status(401).json({ error: 'Invalid webhook payload' });
+      return res.status(httpStatus).json({ error: errorMessage });
     } finally {
       await appendWebhookLog({
         requestId,
         receivedAt: new Date().toISOString(),
         status,
-        matchedAppId: '',
+        matchedAppId,
         httpStatus,
         failureStep: '',
         errorMessage,
