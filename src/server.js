@@ -273,7 +273,7 @@ function createWixClient(appId, publicKey) {
     );
 
     const entry = {
-      requestId: context?.requestId || await getNextRequestId(), // ✅ FIX
+      requestId: await getNextRequestId(),
       receivedAt: new Date().toISOString(),
       eventName: 'APP_INSTANCE_INSTALLED',
       appId,
@@ -340,9 +340,7 @@ app.post(
 
       matchedAppId = configured.appId;
 
-      await configured.client.webhooks.process(rawBody, {
-        context: { requestId }   // ✅ FIX
-      });
+      await configured.client.webhooks.process(rawBody);
 
       status = 'SUCCESS';
       httpStatus = 200;
