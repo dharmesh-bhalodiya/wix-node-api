@@ -325,7 +325,7 @@ app.post(
     const webhookSecret = req.params.webhookSecret || '';
 
     let status = 'FAILED';
-    let httpStatus = 401;
+    let httpStatus = '';
     let errorMessage = '';
     let errorStack = '';
     let matchedAppId = '';
@@ -349,6 +349,7 @@ app.post(
 
       return res.status(200).send();
     } catch (error) {
+      httpStatus = 500;
       errorMessage = error.message;
       errorStack = error.stack;
       return res.status(httpStatus).json({ error: errorMessage });
