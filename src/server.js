@@ -10,6 +10,7 @@ const { appInstances } = require('@wix/app-management');
 
 const app = express();
 const port = Number(process.env.PORT || 3000);
+
 const webhookBasePath =
   process.env.WEBHOOK_BASE_PATH ||
   process.env.WEBHOOK_PATH ||
@@ -25,67 +26,109 @@ if (!spreadsheetId) {
   throw new Error('Missing GOOGLE_SPREADSHEET_ID');
 }
 
-/* ============================================================
+/* =========================
    WIX APPS CONFIG
-============================================================ */
+========================= */
 
 function parseWixAppsConfig(rawValue) {
   const value = String(rawValue || '').trim();
-  if (!value) throw new Error('Missing WIX_APPS_JSON');
-
-  try {
-    const parsed = JSON.parse(value);
-    if (!parsed || typeof parsed !== 'object') {
-      throw new Error('Invalid JSON structure');
-    }
-    return parsed;
-  } catch (err) {
-    throw new Error('Invalid WIX_APPS_JSON format');
+  if (!value) {
+    throw new Error('Missing WIX_APPS_JSON configuration');
   }
+  const parsed = JSON.parse(value);
+  if (!parsed || typeof parsed !== 'object') {
+    throw new Error('WIX_APPS_JSON must be JSON object keyed by appId');
+  }
+  return parsed;
 }
 
 const wixApps = parseWixAppsConfig(process.env.WIX_APPS_JSON);
 
-if (!Object.keys(wixApps).length) {
-  throw new Error('WIX_APPS_JSON must contain at least one app');
-}
-
-/* ============================================================
+/* =========================
    GOOGLE SHEETS
-============================================================ */
+========================= */
 
-function normalizePrivateKey(key) {
-  return key.replace(/\\n/g, '\n');
+function normalizeGooglePrivateKey(rawKey) {
+  return String(rawKey || '').replace(/\\n/g, '\n');
 }
 
 const auth = new google.auth.GoogleAuth({
   credentials: {
     client_email: process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL,
-    private_key: normalizePrivateKey(process.env.GOOGLE_PRIVATE_KEY)
+    private_key: normalizeGooglePrivateKey(process.env.GOOGLE_PRIVATE_KEY)
   },
   scopes: ['https://www.googleapis.com/auth/spreadsheets']
 });
 
 const sheets = google.sheets({ version: 'v4', auth });
 
+function sanitize(value) {
+  if (value === null || value === undefined) return '';
+  return String(value).replace(
+    /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g,
+    ' '
+  );
+}
+
 async function appendRow(sheetName, row) {
   await sheets.spreadsheets.values.append({
     spreadsheetId,
     range: `${sheetName}!A:Z`,
     valueInputOption: 'USER_ENTERED',
-    requestBody: { values: [row] }
+    requestBody: {
+      values: [row.map((c) => sanitize(c))]
+    }
   });
 }
 
-/* ============================================================
-   OAUTH TOKEN CACHE (Production Optimized)
-============================================================ */
+/* =========================
+   REQUEST COUNTER
+========================= */
 
-const oauthTokenCache = new Map();
+let requestCounter = null;
+let counterQueue = Promise.resolve();
 
-async function getOAuthAccessToken(appId, appSecret, instanceId) {
+async function initializeRequestCounter() {
+  if (requestCounter !== null) return;
+
+  const result = await sheets.spreadsheets.values.get({
+    spreadsheetId,
+    range: `${logsSheetName}!A:A`
+  });
+
+  const values = result.data.values || [];
+  let max = 0;
+
+  for (const row of values) {
+    const num = Number.parseInt(String(row?.[0] || ''), 10);
+    if (!Number.isNaN(num) && num > max) {
+      max = num;
+    }
+  }
+
+  requestCounter = max;
+}
+
+function getNextRequestId() {
+  const next = counterQueue.then(async () => {
+    await initializeRequestCounter();
+    requestCounter += 1;
+    return String(requestCounter);
+  });
+
+  counterQueue = next.then(() => undefined, () => undefined);
+  return next;
+}
+
+/* =========================
+   OAUTH TOKEN CACHE
+========================= */
+
+const oauthCache = new Map();
+
+async function getOAuthToken(appId, appSecret, instanceId) {
   const cacheKey = `${appId}:${instanceId}`;
-  const cached = oauthTokenCache.get(cacheKey);
+  const cached = oauthCache.get(cacheKey);
 
   if (cached && cached.expiresAt > Date.now()) {
     return cached.token;
@@ -108,7 +151,7 @@ async function getOAuthAccessToken(appId, appSecret, instanceId) {
   const token = response.data.access_token;
   const expiresIn = response.data.expires_in || 3600;
 
-  oauthTokenCache.set(cacheKey, {
+  oauthCache.set(cacheKey, {
     token,
     expiresAt: Date.now() + (expiresIn - 60) * 1000
   });
@@ -116,15 +159,13 @@ async function getOAuthAccessToken(appId, appSecret, instanceId) {
   return token;
 }
 
-async function getAppInstanceViaOAuth(appId, appSecret, instanceId) {
-  const token = await getOAuthAccessToken(appId, appSecret, instanceId);
+async function getAppInstance(appId, appSecret, instanceId) {
+  const token = await getOAuthToken(appId, appSecret, instanceId);
 
   const response = await axios.get(
     `https://www.wixapis.com/apps/v1/app-instances/${instanceId}`,
     {
-      headers: {
-        Authorization: `Bearer ${token}`
-      },
+      headers: { Authorization: `Bearer ${token}` },
       timeout: 8000
     }
   );
@@ -132,84 +173,74 @@ async function getAppInstanceViaOAuth(appId, appSecret, instanceId) {
   return response.data;
 }
 
-/* ============================================================
-   WIX CLIENT CREATION
-============================================================ */
+/* =========================
+   MULTI APP INIT
+========================= */
 
-function createWixClient(appId, publicKey) {
+const secretMap = {};
+
+for (const [appId, config] of Object.entries(wixApps)) {
   const client = createClient({
-    auth: AppStrategy({ appId, publicKey }),
+    auth: AppStrategy({
+      appId,
+      publicKey: config.publicKey
+    }),
     modules: { appInstances }
   });
 
-  return client;
-}
-
-/* ============================================================
-   MULTI APP INITIALIZATION
-============================================================ */
-
-const secretToClientMap = {};
-
-for (const [appId, config] of Object.entries(wixApps)) {
-  if (!config.publicKey) {
-    throw new Error(`Missing publicKey for app ${appId}`);
-  }
-  if (!config.webhookSecret) {
-    throw new Error(`Missing webhookSecret for app ${appId}`);
-  }
-  if (!config.appSecret) {
-    throw new Error(`Missing appSecret for app ${appId}`);
-  }
-
-  secretToClientMap[config.webhookSecret] = {
+  secretMap[config.webhookSecret] = {
     appId,
     appSecret: config.appSecret,
-    client: createWixClient(appId, config.publicKey)
+    client
   };
 }
 
-/* ============================================================
-   SERVER SETUP
-============================================================ */
+/* =========================
+   SERVER
+========================= */
 
 app.disable('x-powered-by');
 app.use(helmet());
 
 app.get('/healthz', (_req, res) => {
-  res.json({
-    ok: true,
-    configuredApps: Object.keys(secretToClientMap).length
-  });
+  res.json({ ok: true });
 });
-
-/* ============================================================
-   WEBHOOK HANDLER
-============================================================ */
 
 app.post(
   `${webhookBasePath}/:webhookSecret`,
   express.text({ type: '*/*', limit: '100kb' }),
   async (req, res) => {
+    const requestId = await getNextRequestId();
+    const timestamp = new Date().toISOString();
     const rawBody = req.body || '';
     const webhookSecret = req.params.webhookSecret;
 
-    const configured = secretToClientMap[webhookSecret];
-
-    if (!configured) {
-      return res.status(403).json({ error: 'Unknown webhook secret' });
-    }
-
-    const { appId, appSecret, client } = configured;
+    let status = 'FAILED';
+    let statusCode = 500;
+    let errorStep = '';
+    let errorMessage = '';
+    let appId = '';
+    let instanceId = '';
 
     try {
-      await client.webhooks.process(rawBody);
+      const configured = secretMap[webhookSecret];
+
+      if (!configured) {
+        statusCode = 403;
+        errorStep = 'resolve_secret';
+        errorMessage = 'Unknown webhook secret';
+        return res.status(403).json({ error: errorMessage });
+      }
+
+      appId = configured.appId;
+
+      await configured.client.webhooks.process(rawBody);
 
       const payload = JSON.parse(
         Buffer.from(rawBody.split('.')[1], 'base64url').toString()
       );
 
-      const instanceId =
+      instanceId =
         payload?.data?.instanceId ||
         payload?.metadata?.instanceId ||
         '';
@@ -217,51 +248,76 @@ app.post(
       let ownerEmail = '';
       let ownerName = '';
       let websiteDomain = '';
-      let rawInstance = '';
+      let rawInstancePayload = '';
 
       if (instanceId) {
         try {
-          const appInstance = await getAppInstanceViaOAuth(
-            appId,
-            appSecret,
+          const appInstance = await getAppInstance(
+            configured.appId,
+            configured.appSecret,
             instanceId
           );
 
           ownerEmail = appInstance?.site?.ownerInfo?.email || '';
           ownerName = appInstance?.site?.ownerInfo?.name || '';
           websiteDomain = appInstance?.site?.domain || '';
-          rawInstance = JSON.stringify(appInstance);
+          rawInstancePayload = JSON.stringify(appInstance);
         } catch (oauthErr) {
-          console.error('OAuth failure:', oauthErr.message);
+          errorStep = 'oauth_get_app_instance';
+          errorMessage = oauthErr.message;
         }
       }
 
       await appendRow(installsSheetName, [
-        new Date().toISOString(),
+        requestId,
+        timestamp,
+        'APP_INSTANCE_INSTALLED',
         appId,
+        '',
         instanceId,
         ownerEmail,
         ownerName,
+        '',
+        rawInstancePayload,
+        '',
         websiteDomain,
-        rawInstance
-      ]);
-
-      return res.status(200).send();
-    } catch (err) {
-      await appendRow(logsSheetName, [
-        new Date().toISOString(),
-        appId,
-        err.message,
         rawBody
       ]);
 
-      return res.status(401).json({ error: 'Invalid webhook payload' });
+      status = 'SUCCESS';
+      statusCode = 200;
+
+      return res.status(200).send();
+    } catch (err) {
+      statusCode = 401;
+      errorStep = errorStep || 'webhook_processing';
+      errorMessage = err.message;
+      return res.status(statusCode).json({ error: 'Webhook failed' });
+    } finally {
+      try {
+        await appendRow(logsSheetName, [
+          requestId,
+          timestamp,
+          status,
+          appId,
+          statusCode,
+          errorStep,
+          errorMessage,
+          '',
+          '',
+          req.originalUrl,
+          webhookSecret,
+          rawBody
+        ]);
+      } catch (logErr) {
+        console.error('Logging failed', logErr.message);
+      }
     }
   }
 );
 
 app.listen(port, () => {
   console.log(
-    `Webhook server running on port ${port} at ${webhookBasePath}/:webhookSecret`
+    `Webhook server running on port ${port} (${webhookBasePath}/:webhookSecret)`
   );
 });
