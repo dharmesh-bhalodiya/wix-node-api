@@ -27,6 +27,8 @@ if (!spreadsheetId) {
   throw new Error('Missing GOOGLE_SPREADSHEET_ID');
 }
 
+const pendingRequestIds = new Map();
+
 /* ============================================================
    GOOGLE PRIVATE KEY NORMALIZATION
 ============================================================ */
@@ -271,7 +273,7 @@ function createWixClient(appId, publicKey) {
     );
 
     const entry = {
-      requestId: await getNextRequestId(),
+      requestId: pendingRequestIds.get(identity.instanceId) || await getNextRequestId(),
       receivedAt: new Date().toISOString(),
       eventName: 'APP_INSTANCE_INSTALLED',
       appId,
@@ -338,8 +340,16 @@ app.post(
 
       matchedAppId = configured.appId;
 
+      let instanceId = '';
+      const parsed = JSON.parse(rawBody);
+      instanceId = parsed?.metadata?.instanceId || parsed?.instanceId || '';
+      
+      
+      pendingRequestIds.set(instanceId, requestId);
       await configured.client.webhooks.process(rawBody);
-
+      pendingRequestIds.delete(instanceId);
+      
+      
       status = 'SUCCESS';
       httpStatus = 200;
 
