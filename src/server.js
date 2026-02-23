@@ -272,8 +272,9 @@ function createWixClient(appId, publicKey) {
       appId
     );
 
+    
     const entry = {
-      requestId: pendingRequestIds.get(identity.instanceId) || await getNextRequestId(),
+      requestId: pendingRequestIds.get(event?.metadata?.id) || await getNextRequestId(),
       receivedAt: new Date().toISOString(),
       eventName: 'APP_INSTANCE_INSTALLED',
       appId,
@@ -340,14 +341,9 @@ app.post(
 
       matchedAppId = configured.appId;
 
-      let instanceId = '';
-      const parsed = JSON.parse(rawBody);
-      instanceId = parsed?.metadata?.instanceId || parsed?.instanceId || '';
-      
-      
-      pendingRequestIds.set(instanceId, requestId);
+      pendingRequestIds.set(req.headers['x-wix-event-id'], requestId);
       await configured.client.webhooks.process(rawBody);
-      pendingRequestIds.delete(instanceId);
+      pendingRequestIds.delete(req.headers['x-wix-event-id']);
       
       
       status = 'SUCCESS';
