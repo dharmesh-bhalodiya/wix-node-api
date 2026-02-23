@@ -376,6 +376,16 @@ app.post(
   }
 );
 
+app.get('/healthz', (_req, res) => {
+  res.json({
+    ok: true,
+    configuredApps: Object.keys(secretToClientMap).length,
+    webhookPathPattern: `${webhookBasePath}/:webhookSecret`,
+    installsSheetName,
+    logsSheetName
+  });
+});
+
 app.listen(port, () => {
   console.log(
     `Webhook API listening on port ${port} path pattern ${webhookBasePath}/:webhookSecret`
