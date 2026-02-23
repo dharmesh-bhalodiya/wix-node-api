@@ -252,7 +252,7 @@ function createWixClient(appId, publicKey) {
     modules: { appInstances }
   });
 
-  client.appInstances.onAppInstanceInstalled(async (event) => {
+  client.appInstances.onAppInstanceInstalled(async (event, context) => {
     const identity = {
       instanceId:
         event?.metadata?.instanceId ||
@@ -273,7 +273,7 @@ function createWixClient(appId, publicKey) {
     );
 
     const entry = {
-      requestId: await getNextRequestId(),
+      requestId: context?.requestId || await getNextRequestId(), // ✅ FIX
       receivedAt: new Date().toISOString(),
       eventName: 'APP_INSTANCE_INSTALLED',
       appId,
@@ -327,6 +327,7 @@ app.post(
     let status = 'FAILED';
     let httpStatus = 401;
     let errorMessage = '';
+    let errorStack = '';
     let matchedAppId = '';
 
     try {
@@ -339,7 +340,9 @@ app.post(
 
       matchedAppId = configured.appId;
 
-      await configured.client.webhooks.process(rawBody);
+      await configured.client.webhooks.process(rawBody, {
+        context: { requestId }   // ✅ FIX
+      });
 
       status = 'SUCCESS';
       httpStatus = 200;
@@ -347,6 +350,7 @@ app.post(
       return res.status(200).send();
     } catch (error) {
       errorMessage = error.message;
+      errorStack = error.stack;
       return res.status(httpStatus).json({ error: errorMessage });
     } finally {
       await appendWebhookLog({
@@ -355,10 +359,8 @@ app.post(
         status,
         matchedAppId,
         httpStatus,
-        failureStep: '',
         errorMessage,
-        errorLine: '',
-        errorStack: '',
+        errorStack,
         requestPath: req.originalUrl,
         webhookSecret,
         requestBody: rawBody
